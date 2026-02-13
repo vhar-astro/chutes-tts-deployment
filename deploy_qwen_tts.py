@@ -13,7 +13,7 @@ image = (
     Image(
         username="letternumber123",
         name="qwen3-tts-1.7b",
-        tag="0.0.11",
+        tag="0.0.12",
         readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     )
     .from_base("parachutes/base-python:3.12.9")
@@ -23,11 +23,11 @@ image = (
     
     # 2. Install Python dependencies as chutes user
     .set_user("chutes")
-    # First: Install torch, packaging, and psutil (required by flash-attn)
-    .run_command("pip install torch torchaudio packaging psutil")
-    # Second: Install flash-attn separately
+    # First batch: ensures psutil, torch, and packaging are present for flash-attn build
+    .run_command("pip install --no-cache-dir psutil torch torchaudio packaging")
+    # Second: build flash-attn using the environment we just prepared
     .run_command("pip install flash-attn --no-build-isolation")
-    # Third: Install the rest of the libraries
+    # Third: the application itself
     .run_command("pip install qwen-tts soundfile transformers accelerate")
 )
 
