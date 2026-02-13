@@ -8,18 +8,27 @@ from pydantic import BaseModel, Field
 from chutes.image import Image
 from chutes.chute import Chute, NodeSelector
 
-# Define a custom Docker image (Reference only - build is skipped due to auth issues)
+# Define the custom Docker image
 image = (
     Image(
         username="letternumber123",
         name="qwen3-tts-1.7b",
-        tag="0.0.6",
+        tag="0.0.11",
         readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     )
-    .from_base("nvidia/cuda:12.6.1-base-ubuntu24.04")
-    .with_python("3.12.9")
+    .from_base("parachutes/base-python:3.12.9")
+    # 1. Install system dependencies as root
+    .set_user("root")
     .run_command("apt-get update && apt-get install -y libsndfile1 git git-lfs curl")
-    .run_command("pip install -U qwen-tts soundfile torch torchaudio transformers accelerate flash-attn")
+    
+    # 2. Install Python dependencies as chutes user
+    .set_user("chutes")
+    # First: Install torch, packaging, and psutil (required by flash-attn)
+    .run_command("pip install torch torchaudio packaging psutil")
+    # Second: Install flash-attn separately
+    .run_command("pip install flash-attn --no-build-isolation")
+    # Third: Install the rest of the libraries
+    .run_command("pip install qwen-tts soundfile transformers accelerate")
 )
 
 # Chute definition
@@ -28,7 +37,6 @@ chute = Chute(
     name="qwen3-tts-1.7b",
     tagline="Qwen3-TTS 1.7B Base - Voice Cloning TTS",
     readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
-    # image=image, # Disabled: Local build fails with 401
     image=image,
     node_selector=NodeSelector(gpu_count=1, min_vram_gb_per_gpu=16), 
     concurrency=1,
@@ -47,22 +55,10 @@ async def initialize(self):
     """
     Initialize model and dependencies.
     """
-    import sys
-    import subprocess
-    import tempfile
-    
-    # Check if dependencies are installed (in case we are using the fallback image)
-    try:
-        import qwen_tts
-    except ImportError:
-        logger.warning("Dependencies not found, installing at runtime...")
-        subprocess.check_call(["apt-get", "update"])
-        subprocess.check_call(["apt-get", "install", "-y", "libsndfile1"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "qwen-tts", "soundfile", "torch", "transformers", "flash-attn", "accelerate"])
-
     import torch
     import soundfile as sf
     from qwen_tts import Qwen3TTSModel
+    import tempfile
 
     logger.info("Loading Qwen3-TTS model...")
     self.model = Qwen3TTSModel.from_pretrained(
@@ -74,12 +70,10 @@ async def initialize(self):
     self.sf = sf
     self.torch = torch
     
-    # Warmup pass (Pattern matching best practice)
+    # Warmup pass
     logger.info("Running warmup generation...")
     try:
-        # Create dummy 1-second silence wav for reference
         dummy_wav = BytesIO()
-        # 16000 Hz silence
         zero_data = torch.zeros(16000).numpy() 
         sf.write(dummy_wav, zero_data, 16000, format='WAV')
         dummy_wav.seek(0)
