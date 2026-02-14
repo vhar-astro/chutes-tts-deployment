@@ -13,7 +13,7 @@ image = (
     Image(
         username="letternumber123",
         name="qwen3-tts-1.7b",
-        tag="0.0.13",
+        tag="0.0.14",
         readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     )
     .from_base("parachutes/base-python:3.12.9")
@@ -75,6 +75,17 @@ async def initialize(self):
     self.sf = sf
     self.torch = torch
     logger.success("Model loaded successfully!")
+
+    # Warmup pass (text-only, no reference audio needed)
+    logger.info("Running warmup generation...")
+    try:
+        self.model.generate(
+            text="Warmup test.",
+            language="English",
+        )
+        logger.success("Warmup complete!")
+    except Exception as e:
+        logger.warning(f"Warmup failed (non-critical): {e}")
 
 @chute.cord(
     public_api_path="/speak",
