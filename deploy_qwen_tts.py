@@ -13,22 +13,28 @@ image = (
     Image(
         username="letternumber123",
         name="qwen3-tts-1.7b",
-        tag="0.0.12",
+        tag="0.0.13",
         readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     )
     .from_base("parachutes/base-python:3.12.9")
-    # 1. Install system dependencies as root
+    # 1. System deps as root
     .set_user("root")
-    .run_command("apt-get update && apt-get install -y libsndfile1 git git-lfs curl")
-    
-    # 2. Install Python dependencies as chutes user
+    .run_command(
+        "apt-get update && apt-get install -y libsndfile1 sox ffmpeg git git-lfs curl "
+        "&& rm -rf /var/lib/apt/lists/*"
+    )
+    # 2. Python deps as chutes user
     .set_user("chutes")
-    # First batch: ensures psutil, torch, and packaging are present for flash-attn build
-    .run_command("pip install --no-cache-dir psutil torch torchaudio packaging")
-    # Second: build flash-attn using the environment we just prepared
-    .run_command("pip install flash-attn --no-build-isolation")
-    # Third: the application itself
-    .run_command("pip install qwen-tts soundfile transformers accelerate")
+    .run_command("pip install --no-cache-dir torch torchaudio")
+    .run_command("pip install --no-cache-dir qwen-tts")
+    # 3. Pre-download model + tokenizer to HF cache
+    .run_command(
+        'python -c "'
+        "from huggingface_hub import snapshot_download; "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base'); "
+        "snapshot_download('Qwen/Qwen3-TTS-Tokenizer-12Hz')"
+        '"'
+    )
 )
 
 # Chute definition
@@ -58,42 +64,17 @@ async def initialize(self):
     import torch
     import soundfile as sf
     from qwen_tts import Qwen3TTSModel
-    import tempfile
 
     logger.info("Loading Qwen3-TTS model...")
     self.model = Qwen3TTSModel.from_pretrained(
         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         device_map="cuda:0",
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
     )
     self.sf = sf
     self.torch = torch
-    
-    # Warmup pass
-    logger.info("Running warmup generation...")
-    try:
-        dummy_wav = BytesIO()
-        zero_data = torch.zeros(16000).numpy() 
-        sf.write(dummy_wav, zero_data, 16000, format='WAV')
-        dummy_wav.seek(0)
-        
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-             f.write(dummy_wav.read())
-             dummy_path = f.name
-        
-        try:
-            self.model.generate_voice_clone(
-                text="Warmup complete.",
-                language="English",
-                ref_audio=dummy_path,
-            )
-            logger.success("Warmup successful!")
-        finally:
-            if os.path.exists(dummy_path):
-                os.remove(dummy_path)
-    except Exception as e:
-        logger.warning(f"Warmup generation failed (non-critical): {e}")
+    logger.success("Model loaded successfully!")
 
 @chute.cord(
     public_api_path="/speak",
