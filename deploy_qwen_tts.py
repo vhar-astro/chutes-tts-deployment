@@ -13,7 +13,7 @@ image = (
     Image(
         username="letternumber123",
         name="qwen3-tts-1.7b",
-        tag="0.0.14",
+        tag="0.0.18",
         readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     )
     .from_base("parachutes/base-python:3.12.9")
@@ -25,8 +25,7 @@ image = (
     )
     # 2. Python deps as chutes user
     .set_user("chutes")
-    .run_command("pip install --no-cache-dir torch torchaudio")
-    .run_command("pip install --no-cache-dir qwen-tts")
+    .run_command("pip install --no-cache-dir torch torchaudio qwen-tts")
     # 3. Pre-download model + tokenizer to HF cache
     .run_command(
         'python -c "'
@@ -39,13 +38,12 @@ image = (
 
 # Chute definition
 chute = Chute(
-    username="chutes",
+    username="letternumber123",
     name="qwen3-tts-1.7b",
     tagline="Qwen3-TTS 1.7B Base - Voice Cloning TTS",
     readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     image=image,
-    node_selector=NodeSelector(gpu_count=1, min_vram_gb_per_gpu=16), 
-    concurrency=1,
+    node_selector=NodeSelector(gpu_count=1),
     allow_external_egress=True,
 )
 
@@ -76,16 +74,17 @@ async def initialize(self):
     self.torch = torch
     logger.success("Model loaded successfully!")
 
-    # Warmup pass (text-only, no reference audio needed)
+    # Warmup pass with synthetic reference audio
     logger.info("Running warmup generation...")
-    try:
-        self.model.generate(
-            text="Warmup test.",
-            language="English",
-        )
-        logger.success("Warmup complete!")
-    except Exception as e:
-        logger.warning(f"Warmup failed (non-critical): {e}")
+    import numpy as np
+    dummy_audio = np.zeros(24000, dtype=np.float32)  # 1 second of silence at 24kHz
+    self.model.generate_voice_clone(
+        text="Warmup test.",
+        language="English",
+        ref_audio=(dummy_audio, 24000),
+        x_vector_only_mode=True,
+    )
+    logger.success("Warmup complete!")
 
 @chute.cord(
     public_api_path="/speak",
@@ -113,12 +112,13 @@ async def speak(self, args: TTSRequest) -> Response:
          return Response(content="Reference audio (b64 or url) is required for voice cloning.", status_code=400)
 
     try:
-        # Generate voice
+        # Use ICL mode when ref_text is provided, x-vector only mode otherwise
         wavs, sr = self.model.generate_voice_clone(
             text=args.text,
             language=args.language,
             ref_audio=final_ref_audio,
             ref_text=args.ref_text,
+            x_vector_only_mode=args.ref_text is None,
         )
         
         # Save output to buffer
