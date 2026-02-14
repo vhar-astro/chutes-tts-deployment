@@ -8,30 +8,42 @@ from pydantic import BaseModel, Field
 from chutes.image import Image
 from chutes.chute import Chute, NodeSelector
 
-# Define a custom Docker image (Reference only - build is skipped due to auth issues)
+# Define the custom Docker image
 image = (
     Image(
         username="letternumber123",
         name="qwen3-tts-1.7b",
-        tag="0.0.6",
+        tag="0.0.18",
         readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
     )
-    .from_base("nvidia/cuda:12.6.1-base-ubuntu24.04")
-    .with_python("3.12.9")
-    .run_command("apt-get update && apt-get install -y libsndfile1 git git-lfs curl")
-    .run_command("pip install -U qwen-tts soundfile torch torchaudio transformers accelerate flash-attn")
+    .from_base("parachutes/base-python:3.12.9")
+    # 1. System deps as root
+    .set_user("root")
+    .run_command(
+        "apt-get update && apt-get install -y libsndfile1 sox ffmpeg git git-lfs curl "
+        "&& rm -rf /var/lib/apt/lists/*"
+    )
+    # 2. Python deps as chutes user
+    .set_user("chutes")
+    .run_command("pip install --no-cache-dir torch torchaudio qwen-tts")
+    # 3. Pre-download model + tokenizer to HF cache
+    .run_command(
+        'python -c "'
+        "from huggingface_hub import snapshot_download; "
+        "snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base'); "
+        "snapshot_download('Qwen/Qwen3-TTS-Tokenizer-12Hz')"
+        '"'
+    )
 )
 
 # Chute definition
 chute = Chute(
-    username="chutes",
+    username="letternumber123",
     name="qwen3-tts-1.7b",
     tagline="Qwen3-TTS 1.7B Base - Voice Cloning TTS",
     readme="## Qwen3-TTS 1.7B Base\n\nText-to-speech with voice cloning capabilities using Qwen/Qwen3-TTS-12Hz-1.7B-Base.",
-    # image=image, # Disabled: Local build fails with 401
     image=image,
-    node_selector=NodeSelector(gpu_count=1, min_vram_gb_per_gpu=16), 
-    concurrency=1,
+    node_selector=NodeSelector(gpu_count=1),
     allow_external_egress=True,
 )
 
@@ -47,19 +59,6 @@ async def initialize(self):
     """
     Initialize model and dependencies.
     """
-    import sys
-    import subprocess
-    import tempfile
-    
-    # Check if dependencies are installed (in case we are using the fallback image)
-    try:
-        import qwen_tts
-    except ImportError:
-        logger.warning("Dependencies not found, installing at runtime...")
-        subprocess.check_call(["apt-get", "update"])
-        subprocess.check_call(["apt-get", "install", "-y", "libsndfile1"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "qwen-tts", "soundfile", "torch", "transformers", "flash-attn", "accelerate"])
-
     import torch
     import soundfile as sf
     from qwen_tts import Qwen3TTSModel
@@ -69,37 +68,23 @@ async def initialize(self):
         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         device_map="cuda:0",
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
     )
     self.sf = sf
     self.torch = torch
-    
-    # Warmup pass (Pattern matching best practice)
+    logger.success("Model loaded successfully!")
+
+    # Warmup pass with synthetic reference audio
     logger.info("Running warmup generation...")
-    try:
-        # Create dummy 1-second silence wav for reference
-        dummy_wav = BytesIO()
-        # 16000 Hz silence
-        zero_data = torch.zeros(16000).numpy() 
-        sf.write(dummy_wav, zero_data, 16000, format='WAV')
-        dummy_wav.seek(0)
-        
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-             f.write(dummy_wav.read())
-             dummy_path = f.name
-        
-        try:
-            self.model.generate_voice_clone(
-                text="Warmup complete.",
-                language="English",
-                ref_audio=dummy_path,
-            )
-            logger.success("Warmup successful!")
-        finally:
-            if os.path.exists(dummy_path):
-                os.remove(dummy_path)
-    except Exception as e:
-        logger.warning(f"Warmup generation failed (non-critical): {e}")
+    import numpy as np
+    dummy_audio = np.zeros(24000, dtype=np.float32)  # 1 second of silence at 24kHz
+    self.model.generate_voice_clone(
+        text="Warmup test.",
+        language="English",
+        ref_audio=(dummy_audio, 24000),
+        x_vector_only_mode=True,
+    )
+    logger.success("Warmup complete!")
 
 @chute.cord(
     public_api_path="/speak",
@@ -127,12 +112,13 @@ async def speak(self, args: TTSRequest) -> Response:
          return Response(content="Reference audio (b64 or url) is required for voice cloning.", status_code=400)
 
     try:
-        # Generate voice
+        # Use ICL mode when ref_text is provided, x-vector only mode otherwise
         wavs, sr = self.model.generate_voice_clone(
             text=args.text,
             language=args.language,
             ref_audio=final_ref_audio,
             ref_text=args.ref_text,
+            x_vector_only_mode=args.ref_text is None,
         )
         
         # Save output to buffer
